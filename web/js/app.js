@@ -4,7 +4,9 @@ let datosFlota = {};
 let maquinaSeleccionada = "";
 let modalInstancia = null;
 
-// 1. DETECTOR DE SESIÓN
+// ==========================================
+// 1. CONTROL DE SESIÓN Y AUTENTICACIÓN
+// ==========================================
 auth.onAuthStateChanged(user => {
     if (user) {
         usuarioActual = user;
@@ -22,28 +24,40 @@ auth.onAuthStateChanged(user => {
     }
 });
 
-// 2. FUNCIONES DE AUTENTICACIÓN
 function procesarAuth(e) {
     e.preventDefault();
-    const email = document.getElementById("auth-email").value;
-    const password = document.getElementById("auth-password").value;
+    const email = document.getElementById("auth-email").value.trim();
+    const password = document.getElementById("auth-password").value.trim();
 
     auth.signInWithEmailAndPassword(email, password)
-        .catch(error => mostrarErrorAuth(error.message));
+        .catch(error => mostrarErrorAuth(interpretarErrorFirebase(error.code)));
 }
 
 function registrarUsuario() {
-    const email = document.getElementById("auth-email").value;
-    const password = document.getElementById("auth-password").value;
+    const email = document.getElementById("auth-email").value.trim();
+    const password = document.getElementById("auth-password").value.trim();
 
     if(!email || !password) {
-        mostrarErrorAuth("Ingrese correo y contraseña para crear la cuenta.");
+        mostrarErrorAuth("Por favor ingrese correo y contraseña.");
+        return;
+    }
+
+    if (password.length < 6) {
+        mostrarErrorAuth("La contraseña debe tener al menos 6 caracteres.");
         return;
     }
 
     auth.createUserWithEmailAndPassword(email, password)
-        .then(() => alert("¡Cuenta creada exitosamente para " + email + "!"))
-        .catch(error => mostrarErrorAuth(error.message));
+        .then(userCredential => {
+            const uid = userCredential.user.uid;
+            // Registrar perfil base en la base de datos
+            db.ref("usuarios/" + uid + "/perfil").set({
+                correo: email,
+                fecha_registro: new Date().toISOString()
+            });
+            alert("¡Usuario registrado con éxito! Bienvenido a Solutecnic IoT.");
+        })
+        .catch(error => mostrarErrorAuth(interpretarErrorFirebase(error.code)));
 }
 
 function cerrarSesion() {
@@ -56,7 +70,25 @@ function mostrarErrorAuth(msg) {
     errDiv.classList.remove("d-none");
 }
 
-// 3. BASE DE DATOS EN TIEMPO REAL
+function interpretarErrorFirebase(code) {
+    switch (code) {
+        case 'auth/email-already-in-use':
+            return 'El correo ya se encuentra registrado.';
+        case 'auth/invalid-email':
+            return 'El correo ingresado no es válido.';
+        case 'auth/weak-password':
+            return 'La contraseña debe tener mínimo 6 caracteres.';
+        case 'auth/wrong-password':
+        case 'auth/user-not-found':
+            return 'Correo o contraseña incorrectos.';
+        default:
+            return 'Error en la autenticación: ' + code;
+    }
+}
+
+// ==========================================
+// 2. LECTURA EN TIEMPO REAL
+// ==========================================
 function escucharMaquinasEnTiempoReal() {
     const refUsuario = db.ref("usuarios/" + usuarioActual.uid + "/equipos");
     
@@ -64,6 +96,7 @@ function escucharMaquinasEnTiempoReal() {
         datosFlota = snapshot.val() || {};
         actualizarResumenGlobal();
         actualizarSelector();
+        actualizarTablaReporte();
         
         if (maquinaSeleccionada && datosFlota[maquinaSeleccionada]) {
             mostrarDetalleMaquina(datosFlota[maquinaSeleccionada]);
@@ -80,7 +113,9 @@ function escucharMaquinasEnTiempoReal() {
     });
 }
 
-// 4. GESTIÓN DE MÁQUINAS
+// ==========================================
+// 3. REGISTRO DE NUEVA MAQUINARIA
+// ==========================================
 function abrirModalNuevaMaquina() {
     if(!modalInstancia) modalInstancia = new bootstrap.Modal(document.getElementById('modalMaquina'));
     modalInstancia.show();
@@ -107,11 +142,13 @@ function guardarNuevaMaquina(e) {
     }).then(() => {
         modalInstancia.hide();
         document.getElementById("form-nueva-maquina").reset();
-        alert(`¡Máquina ${id} creada con éxito!\n\nConfigura esta ruta en tu ESP32:\n/usuarios/${usuarioActual.uid}/equipos/${id}.json`);
+        alert(`¡Máquina ${id} registrada correctamente!\n\nRuta para tu ESP32:\n/usuarios/${usuarioActual.uid}/equipos/${id}.json`);
     });
 }
 
-// 5. RENDERIZADO VISUAL
+// ==========================================
+// 4. RENDIMIENTO Y VISUALIZACIÓN
+// ==========================================
 function inicializarMapa() {
     if(!mapa) {
         mapa = L.map('mapa').setView([10.9685, -74.7813], 12);
@@ -219,4 +256,79 @@ function limpiarPantallaSinDatos() {
     document.getElementById("lbl-estado").className = "badge badge-status bg-secondary";
     document.getElementById("lbl-estado").innerText = "SIN MÁQUINAS";
     if(miGrafica) { miGrafica.data.datasets[0].data = [0, 0]; miGrafica.update(); }
+}
+
+// ==========================================
+// 5. MÓDULO DE REPORTES Y EXPORTACIÓN
+// ==========================================
+function actualizarTablaReporte() {
+    const tbody = document.getElementById("tabla-reportes-body");
+    if (!tbody) return;
+
+    tbody.innerHTML = "";
+    const llaves = Object.keys(datosFlota);
+
+    if (llaves.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted">No hay registros de maquinaria.</td></tr>`;
+        return;
+    }
+
+    llaves.forEach(id => {
+        const eq = datosFlota[id];
+        const hrsTrabajo = parseFloat(eq.horas_trabajo || 0);
+        const hrsRalenti = parseFloat(eq.horas_ralenti || 0);
+        const totalHrs = hrsTrabajo + hrsRalenti;
+        const eficiencia = totalHrs > 0 ? ((hrsTrabajo / totalHrs) * 100).toFixed(1) : "0.0";
+
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+            <td class="fw-bold">${id}</td>
+            <td>${eq.nombre || 'Sin Nombre'}</td>
+            <td><span class="badge bg-light text-dark border">${eq.tipo || 'N/A'}</span></td>
+            <td class="text-success fw-bold">${hrsTrabajo.toFixed(2)} hrs</td>
+            <td class="text-warning fw-bold">${hrsRalenti.toFixed(2)} hrs</td>
+            <td><span class="badge bg-info text-dark">${eficiencia}%</span></td>
+            <td><span class="badge ${String(eq.estado).includes('TRABAJANDO') ? 'bg-warning text-dark' : 'bg-success'}">${eq.estado || 'IDLE'}</span></td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+function exportarExcel() {
+    const llaves = Object.keys(datosFlota);
+    
+    // Si hay datos en memoria, exportamos desde la estructura de Firebase
+    if (llaves.length > 0) {
+        let csvContent = "data:text/csv;charset=utf-8,\uFEFF"; // \uFEFF fuerza formato UTF-8 en Excel
+        csvContent += "ID Dispositivo,Nombre Equipo,Tipo,Horas Trabajo (Efectivas),Horas Ralenti,Eficiencia (%),Estado Actual\n";
+
+        llaves.forEach(id => {
+            const eq = datosFlota[id];
+            const hrsTrabajo = parseFloat(eq.horas_trabajo || 0).toFixed(2);
+            const hrsRalenti = parseFloat(eq.horas_ralenti || 0).toFixed(2);
+            const totalHrs = parseFloat(hrsTrabajo) + parseFloat(hrsRalenti);
+            const eficiencia = totalHrs > 0 ? ((hrsTrabajo / totalHrs) * 100).toFixed(1) : "0.0";
+
+            csvContent += `"${id}","${eq.nombre || ''}","${eq.tipo || ''}","${hrsTrabajo}","${hrsRalenti}","${eficiencia}%","${eq.estado || 'IDLE'}"\n`;
+        });
+
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", `Reporte_Flotas_Solutecnic_${new Date().toISOString().slice(0,10)}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    } else {
+        alert("Aún no tienes maquinaria registrada en tu cuenta. Agrega un equipo primero con el botón '+ Nueva Maquinaria'.");
+    }
+
+
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `Reporte_Flotas_Solutecnic_${new Date().toISOString().slice(0,10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
 }
